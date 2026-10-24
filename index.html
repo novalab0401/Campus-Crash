@@ -235,15 +235,23 @@ button { font: inherit; color: var(--ink); cursor: pointer; }
 .pick[aria-pressed="true"] small { color: var(--paper); }
 
 /* walking: crosshair and a touch move pad */
+/* the aim mark follows your finger or mouse: where it is, is where the weapon goes */
 #cross {
   position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 22px;
-  height: 22px;
-  margin: -11px 0 0 -11px;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
   pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s;
+  z-index: 5;
 }
+#cross.on { opacity: 1; transition: opacity 0.05s; }
+#cross.fire { animation: crossKick 0.18s ease-out; }
+@keyframes crossKick { 0% { scale: 1.45; } 100% { scale: 1; } }
+#cross i { position: absolute; inset: 5px; border: 2px solid var(--paper); border-radius: 50%; box-shadow: 0 0 0 1.5px var(--ink), inset 0 0 0 1.5px var(--ink); }
 #cross::before, #cross::after {
   content: "";
   position: absolute;
@@ -251,8 +259,8 @@ button { font: inherit; color: var(--ink); cursor: pointer; }
   box-shadow: 0 0 0 1.5px var(--ink);
   border-radius: 2px;
 }
-#cross::before { left: 10px; top: 2px; width: 2px; height: 18px; }
-#cross::after { top: 10px; left: 2px; height: 2px; width: 18px; }
+#cross::before { left: 14px; top: 0; width: 2px; height: 30px; }
+#cross::after { top: 14px; left: 0; height: 2px; width: 30px; }
 body.map #cross { display: none; }
 #pad {
   position: fixed;
@@ -534,7 +542,6 @@ body.map #aimTag { display: none; }
 <div id="labels"></div>
 <div id="pops"></div>
 <div id="aimTag" hidden></div>
-<div id="cross"></div>
 
 <header class="stats panel">
   <h1><span>CC</span>Campus Crash</h1>
@@ -552,7 +559,7 @@ body.map #aimTag { display: none; }
   <button id="modeBtn" class="chip modec" title="지도 보기 / 걸어 다니기">지도 보기 (V)</button>
   <button id="hintBtn" class="chip hintc" title="힌트">힌트 (H)</button>
   <button id="labelBtn" class="chip" aria-pressed="true" title="건물 이름">건물 이름 (L)</button>
-  <button id="sound" class="chip" aria-pressed="false" title="소리">소리 켜기</button>
+  <button id="sound" class="chip" aria-pressed="true" title="소리">소리 끄기</button>
   <button id="reset" class="chip" title="모두 되돌리기">모두 되돌리기 (R)</button>
 </div>
 
@@ -2706,14 +2713,27 @@ function explosionFx(p, k, surface, water) {
   sfx(k, 1, water);
 }
 
-/* ---------- sound (synthesized, off until the toggle) ---------- */
-let audio = null, noiseBuf = null, soundOn = false, lastSfx = 0;
+/* ---------- sound (synthesized, on from the start) ----------
+   Browsers only let a page make sound after the first touch, click or key press,
+   so the audio is switched on by that first input (before the weapon handler runs). */
+let audio = null, noiseBuf = null, soundOn = true, lastSfx = 0;
 function initAudio() {
   audio = new (window.AudioContext || window.webkitAudioContext)();
   noiseBuf = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
   const ch = noiseBuf.getChannelData(0);
   for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
 }
+function unlockAudio() {
+  if (!audio) initAudio();
+  if (audio.state === 'suspended') audio.resume();
+  // a silent blip, which older iPhones need before they let Web Audio play
+  const b = audio.createBufferSource();
+  b.buffer = audio.createBuffer(1, 1, 22050);
+  b.connect(audio.destination);
+  b.start(0);
+  if (audio.state === 'running') for (const ev of ['pointerdown', 'touchend', 'keydown', 'click']) removeEventListener(ev, unlockAudio, true);
+}
+for (const ev of ['pointerdown', 'touchend', 'keydown', 'click']) addEventListener(ev, unlockAudio, true);
 function sfx(k, I, water) {
   if (!soundOn || !audio) return;
   const t = audio.currentTime;
@@ -2790,14 +2810,15 @@ function walk(dt) {
   const f = (keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0);
   const s = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
   if (f || s) {
-    const speed = keys.shift ? 14 : 6, L = Math.hypot(f, s);
+    const run = keys.shift || padRun;
+    const speed = run ? 14 : 6, L = Math.hypot(f, s);
     const sin = Math.sin(player.yaw), cos = Math.cos(player.yaw);
     const dx = ((-sin * f + cos * s) / L) * speed * dt, dz = ((-cos * f - sin * s) / L) * speed * dt;
     // slide along walls: try both axes, then each one
     if (!blocked(player.x + dx, player.z + dz)) { player.x += dx; player.z += dz; }
     else if (!blocked(player.x + dx, player.z)) player.x += dx;
     else if (!blocked(player.x, player.z + dz)) player.z += dz;
-    player.bob += dt * (keys.shift ? 13 : 9);
+    player.bob += dt * (run ? 13 : 9);
   }
   const ground = terrainH(player.x, player.z);
   player.y += (ground - player.y) * Math.min(1, dt * 12);
@@ -3216,7 +3237,7 @@ function toggleLabels() {
 $('labelBtn').addEventListener('click', toggleLabels);
 $('modeBtn').addEventListener('click', () => setMode(mode === 'walk' ? 'map' : 'walk'));
 $('sound').addEventListener('click', (e) => {
-  if (!audio) initAudio();
+  unlockAudio();
   soundOn = !soundOn;
   if (soundOn && audio.state === 'suspended') audio.resume();
   e.currentTarget.setAttribute('aria-pressed', String(soundOn));
@@ -3225,8 +3246,15 @@ $('sound').addEventListener('click', (e) => {
 if (innerWidth < 760 || innerHeight < 500 || IS_PHONE) $('log').open = false;
 
 // Touch move pad
+// the run button is a switch: tap once to run, tap again to walk, so you can steer with the other thumb
+let padRun = false;
 for (const b of document.querySelectorAll('#pad button')) {
   const k = b.dataset.k;
+  if (k === 'shift') {
+    b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('pointerdown', (e) => { e.preventDefault(); padRun = !padRun; b.classList.toggle('on', padRun); b.setAttribute('aria-pressed', String(padRun)); });
+    continue;
+  }
   const on = (e) => { e.preventDefault(); keys[k] = true; b.classList.add('on'); };
   const off = () => { keys[k] = false; b.classList.remove('on'); };
   b.addEventListener('pointerdown', on);
